@@ -1,0 +1,47 @@
+name: Deploy to EKS
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  EKS_CLUSTER_NAME: "prod-oidc-cluster"
+  AWS_REGION: "ca-central-1"
+  NAMESPACE: "web-prod"
+
+permissions: 
+  contents: read 
+  id-token: write
+
+jobs:
+  deployment:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v5
+      - name: 2. Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: 3. Configure kubeconfig
+        run: |
+              aws eks update-kubeconfig \
+              --name ${{ env.EKS_CLUSTER_NAME }} \
+              --region ${{ env.AWS_REGION }}
+      - name: 4. Deploy the application
+        run: |
+              echo "Deploying application..."
+              kubectl apply -f k8s/deployment.yaml
+      - name: 5. Validate Deployment
+        run: |
+              if kubectl rollout status deployment/hello-web -n ${{ env.NAMESPACE }} --timeout=5s; then
+                  echo "[INFO] Deployment successfully rolled out!"
+              else
+                  echo "[ERROR] Deployment failed"
+                  kubectl describe deployment hello-web -n ${{ env.NAMESPACE }}
+                  exit 1
+              fi
+              
