@@ -1,53 +1,83 @@
-# Welcome
 name: Deploy to EKS
+
 on:
   push:
     branches:
       - main
   workflow_dispatch:
 
+permissions:
+  id-token: write          # Required for OIDC
+  contents: read
+
 env:
-  EKS_CLUSTER_NAME: "prod-oidc-cluster"
   AWS_REGION: "ca-central-1"
+  EKS_CLUSTER_NAME: "prod-oidc-cluster"
   NAMESPACE: "web-prod"
 
-permissions: 
-  contents: read 
-  id-token: write
-
 jobs:
-  deployment:
+
+  # ✅ Debug OIDC Token Job
+  debug-oidc:
+    name: Debug OIDC Token
     runs-on: ubuntu-latest
-    environment: dev
+    steps:
+      - name: Request and Decode OIDC Token
+        run: |
+          echo "REQUESTING OIDC TOKEN..."
+          
+          TOKEN_JSON=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+
+          JWT=$(echo "$TOKEN_JSON" | jq -r .value)
+
+          echo "🔹 SUB claim:"
+          echo "$JWT" | cut -d '.' -f2 | base64 -d | jq -r .sub
+
+          echo "🔹 AUD claim:"
+          echo "$JWT" | cut -d '.' -f2 | base64 -d | jq -r .aud
+
+          echo "🔹 ISS claim:"
+          echo "$JWT" | cut -d '.' -f2 | base64 -d | jq -r .iss
+
+          echo "🔹 GITHUB_REF:"
+          echo "$GITHUB_REF"
+
+
+  # ✅ Deployment Job
+  deployment:
+    needs: debug-oidc    # ensure debug runs first
+    runs-on: ubuntu-latest
+
     steps:
       - name: 1. Checkout repository
         uses: actions/checkout@v5
+
       - name: 2. Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: 3. Verify caller identity
-        run: aws sts get-caller-identity
+      - name: 3. Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
 
-      - name: 4. Configure kubeconfig
+      - name: 4. Deploy the application
         run: |
-              aws eks update-kubeconfig \
-              --name ${{ env.EKS_CLUSTER_NAME }} \
-              --region ${{ env.AWS_REGION }}
-      - name: 5. Deploy the application
+          echo "Deploying application..."
+          kubectl apply -f k8s/deployment.yaml -n ${{ env.NAMESPACE }}
+
+      - name: 5. Validate Deployment
         run: |
-              echo "Deploying application..."
-              kubectl apply -f k8s/deployment.yaml
-      - name: 6. Validate Deployment
-        run: |
-              if kubectl rollout status deployment/hello-web -n ${{ env.NAMESPACE }} --timeout=5s; then
-                  echo "[INFO] Deployment successfully rolled out!"
-              else
-                  echo "[ERROR] Deployment failed"
-                  kubectl describe deployment hello-web -n ${{ env.NAMESPACE }}
-                  exit 1
-              fi
-              
-  
+          echo "Validating rollout..."
+          if kubectl rollout status deployment/hello-web -n ${{ env.NAMESPACE }} --timeout=15s; then
+            echo "✅ Deployment rolled out successfully!"
+          else
+            echo "❌ Deployment failed"
+            kubectl describe deployment hello-web -n ${{ env.NAMESPACE }}
+            exit 1
+          fi
+
