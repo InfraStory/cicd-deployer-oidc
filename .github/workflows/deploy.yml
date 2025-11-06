@@ -1,40 +1,53 @@
+# Welcome
 name: Deploy to EKS
-
 on:
-  workflow_dispatch:  # allows manual debugging
   push:
     branches:
       - main
-
-permissions:
-  id-token: write
-  contents: read
+  workflow_dispatch:
 
 env:
-  AWS_REGION: "ca-central-1"
   EKS_CLUSTER_NAME: "prod-oidc-cluster"
+  AWS_REGION: "ca-central-1"
+  NAMESPACE: "web-prod"
+
+permissions: 
+  contents: read 
+  id-token: write
 
 jobs:
-
-  debug-oidc:
-    name: Debug OIDC Token
+  deployment:
     runs-on: ubuntu-latest
+    environment: dev
     steps:
-      - name: Dump OIDC Claims
+      - name: 1. Checkout repository
+        uses: actions/checkout@v5
+      - name: 2. Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 3. Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: 4. Configure kubeconfig
         run: |
-          echo "REQUESTING OIDC TOKEN..."
-          TOKEN_JSON=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
-
-          JWT=$(echo "$TOKEN_JSON" | jq -r .value)
-
-          echo "🔹 SUB claim:"
-          echo "$JWT" | cut -d '.' -f2 | base64 -d 2>/dev/null | jq -r .sub
-
-          echo "🔹 AUD claim:"
-          echo "$JWT" | cut -d '.' -f2 | base64 -d 2>/dev/null | jq -r .aud
-
-          echo "🔹 GITHUB_REF:"
-          echo "$GITHUB_REF"
-
-
+              aws eks update-kubeconfig \
+              --name ${{ env.EKS_CLUSTER_NAME }} \
+              --region ${{ env.AWS_REGION }}
+      - name: 5. Deploy the application
+        run: |
+              echo "Deploying application..."
+              kubectl apply -f k8s/deployment.yaml
+      - name: 6. Validate Deployment
+        run: |
+              if kubectl rollout status deployment/hello-web -n ${{ env.NAMESPACE }} --timeout=5s; then
+                  echo "[INFO] Deployment successfully rolled out!"
+              else
+                  echo "[ERROR] Deployment failed"
+                  kubectl describe deployment hello-web -n ${{ env.NAMESPACE }}
+                  exit 1
+              fi
+              
+  
